@@ -1,5 +1,5 @@
 /*
- * Copyright © 2025 Gage Singleton <singletongage948@gmail.com>	
+ * Copyright © 2025 Gage Singleton <singletongage948@gmail.com>
  *
  * Permission is hereby granted, free of charge, to any person obtaining a copy of this software and associated documentation files (the “Software”), to deal in the Software without restriction, including without limitation the rights to use, copy, modify, merge, publish, distribute, sublicense, and/or sell copies of the Software, and to permit persons to whom the Software is furnished to do so, subject to the following conditions:
  *
@@ -8,15 +8,16 @@
  * THE SOFTWARE IS PROVIDED “AS IS”, WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 */
 
-
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <ctype.h>
+#include <stdint.h>
 
+#define MAX_INPUT 8192
+#define MAX_NORM   (MAX_INPUT*2)
 #define MAX_SHELLCODE_SIZE 4096
 
-// Convert a hex digit to integer value
 static int hexval(int c) {
     if ('0'<=c && c<='9') return c-'0';
     if ('a'<=c && c<='f') return c-'a'+10;
@@ -24,104 +25,163 @@ static int hexval(int c) {
     return -1;
 }
 
-int main(void) {
-    char line[65536];
-    printf("Paste shellcode as one line (supports \\xNN, spaces, commas):\n");
-    if (!fgets(line, sizeof(line), stdin)) {
+static void usage(const char *prog) {
+    fprintf(stderr,
+        "Usage: %s [--exec] [--verbose]\n"
+        "  Paste shellcode on stdin (supports \\xNN, spaces, commas, raw hex).\n"
+        "  --exec    : generate loader.c with execution enabled (explicit opt-in)\n"
+        "  --verbose : print normalized hex and details\n", prog);
+}
+
+int main(int argc, char **argv) {
+    int enable_exec = 0;
+    int verbose = 0;
+
+    for (int i = 1; i < argc; ++i) {
+        if (strcmp(argv[i], "--exec") == 0) enable_exec = 1;
+        else if (strcmp(argv[i], "--verbose") == 0) verbose = 1;
+        else if (strcmp(argv[i], "--help") == 0) { usage(argv[0]); return 0; }
+        else { fprintf(stderr, "Unknown option: %s\n", argv[i]); usage(argv[0]); return 1; }
+    }
+
+    char *line = malloc(MAX_INPUT);
+    if (!line) { perror("malloc"); return 1; }
+
+    fprintf(stdout, "Paste shellcode as one line (supports \\xNN, spaces, commas):\n");
+    if (!fgets(line, MAX_INPUT, stdin)) {
         fprintf(stderr, "No input.\n");
+        free(line);
         return 1;
     }
 
-    // Normalize into pure hex digits
-    char norm[65536];
+    size_t len = strnlen(line, MAX_INPUT);
+    // trim newline
+    if (len && (line[len-1] == '\n' || line[len-1] == '\r')) {
+        line[--len] = '\0';
+    }
+
+    char *norm = malloc(MAX_NORM);
+    if (!norm) { perror("malloc"); free(line); return 1; }
     size_t ni = 0;
-    for (size_t i=0; line[i] && ni+4 < sizeof(norm); ++i) {
-        if (line[i] == '\\' && (line[i+1]=='x' || line[i+1]=='X')
-            && isxdigit((unsigned char)line[i+2]) && isxdigit((unsigned char)line[i+3])) {
+
+    // Normalize into pure hex digits with safe bounds checks.
+    for (size_t i = 0; i < len && ni + 2 < MAX_NORM; ++i) {
+        if (line[i] == '\\' && i + 3 < len &&
+            (line[i+1] == 'x' || line[i+1] == 'X') &&
+            isxdigit((unsigned char)line[i+2]) &&
+            isxdigit((unsigned char)line[i+3])) {
             norm[ni++] = line[i+2];
             norm[ni++] = line[i+3];
             i += 3;
         } else if (isxdigit((unsigned char)line[i])) {
             norm[ni++] = line[i];
         } else {
-            // ignore spaces, commas, etc.
+            /* ignore separators */
         }
     }
     norm[ni] = '\0';
 
-    if (ni == 0 || (ni % 2) != 0) {
-        fprintf(stderr, "Invalid input: must contain even number of hex digits.\n");
+    if (ni == 0) {
+        fprintf(stderr, "No hex digits found in input.\n");
+        free(line); free(norm);
+        return 1;
+    }
+    if (ni % 2 != 0) {
+        fprintf(stderr, "Invalid input: odd number of hex digits (%zu). Normalized: %s\n", ni, norm);
+        free(line); free(norm);
         return 1;
     }
 
     size_t bytecount = ni / 2;
     if (bytecount > MAX_SHELLCODE_SIZE) {
-        fprintf(stderr, "Shellcode too large (max %d bytes).\n", MAX_SHELLCODE_SIZE);
+        fprintf(stderr, "Shellcode too large (%zu bytes). Max is %d.\n", bytecount, MAX_SHELLCODE_SIZE);
+        free(line); free(norm);
         return 1;
     }
 
-    unsigned char bytes[MAX_SHELLCODE_SIZE];
-    for (size_t i=0; i<bytecount; ++i) {
-        int hi = hexval(norm[2*i]);
-        int lo = hexval(norm[2*i+1]);
+    uint8_t bytes[MAX_SHELLCODE_SIZE];
+    for (size_t i = 0; i < bytecount; ++i) {
+        int hi = hexval((int)norm[2*i]);
+        int lo = hexval((int)norm[2*i+1]);
         if (hi < 0 || lo < 0) {
-            fprintf(stderr, "Invalid hex at position %zu.\n", 2*i);
+            fprintf(stderr, "Invalid hex at normalized position %zu (chars '%c%c').\n",
+                    2*i, norm[2*i], norm[2*i+1]);
+            free(line); free(norm);
             return 1;
         }
-        bytes[i] = (unsigned char)((hi<<4)|lo);
+        bytes[i] = (uint8_t)((hi << 4) | lo);
+    }
+
+    if (verbose) {
+        fprintf(stdout, "Normalized hex (%zu digits -> %zu bytes):\n", ni, bytecount);
+        for (size_t i = 0; i < ni; ++i) {
+            putchar(norm[i]);
+            if ((i & 1) && (i+1 < ni)) putchar(' ');
+        }
+        putchar('\n');
     }
 
     FILE *out = fopen("loader.c", "w");
-    if (!out) { perror("fopen loader.c"); return 1; }
+    if (!out) { perror("fopen loader.c"); free(line); free(norm); return 1; }
 
     fprintf(out,
-"/*\n"
-" * loader.c\n"
-" * Generated by Shellcode Loader Generator\n"
-" * MIT License\n"
-" * WARNING: Only run in a controlled, safe environment.\n"
-" * By default, this loader does NOT execute shellcode.\n"
-" * Set ENABLE_EXECUTION to 1 to enable execution.\n"
+"/* loader.c - generated by generator.c\n"
+" * WARNING: running generated loader executes arbitrary code. Only enable execution\n"
+" * with explicit consent. This generated file defaults to execution disabled.\n"
 " */\n\n"
 "#include <stdio.h>\n"
 "#include <stdlib.h>\n"
-"#include <string.h>\n"
-"#include <sys/mman.h> // Linux; replace with VirtualAlloc for Windows\n\n"
-"#define ENABLE_EXECUTION 1\n\n"
+"#include <string.h>\n"#include <stdint.h>\n"
+);
+
+    fprintf(out,
+"#if defined(_WIN32) || defined(_WIN64)\n"
+"# include <windows.h>\n"#endif\n\n");
+
+    fprintf(out, "#define ENABLE_EXECUTION %d /* set at generation time or override when compiling */\n\n", enable_exec ? 1 : 0);
+
+    fprintf(out,
 "int main(void) {\n"
 "    unsigned char shellcode[] = {");
-
     for (size_t i = 0; i < bytecount; ++i) {
         if (i % 12 == 0) fprintf(out, "\n        ");
         fprintf(out, "0x%02X", bytes[i]);
         if (i + 1 != bytecount) fprintf(out, ", ");
     }
-
     fprintf(out,
 "\n    };\n"
 "    size_t sc_size = sizeof(shellcode);\n\n"
-"    printf(\"Shellcode (%zu bytes):\\n\", sc_size);\n"
-"    for (size_t i = 0; i < sc_size; i++) {\n"
-"        printf(\"%02X \", shellcode[i]);\n"
-"    }\n"
-"    printf(\"\\n\");\n\n"
+"    /* By default do not print shellcode; enable verbose build-time flag if needed */\n" 
+"    printf(\"Generated loader: %zu bytes (execution %s)\\n\", sc_size, (ENABLE_EXECUTION ? \"ENABLED\" : \"DISABLED\"));\n\n"
 "#if ENABLE_EXECUTION\n"
-"    void* exec_mem = mmap(0, sc_size, PROT_READ | PROT_WRITE | PROT_EXEC,\n"
-"                          MAP_ANON | MAP_PRIVATE, -1, 0);\n"
-"    if (exec_mem == MAP_FAILED) {\n"
-"        perror(\"mmap failed\");\n"
-"        return 1;\n"
-"    }\n"
-"    memcpy(exec_mem, shellcode, sc_size);\n"
-"    ((void(*)())exec_mem)();\n"
+"    /* Platform-specific allocation and execute */\n"#if defined(_WIN32) || defined(_WIN64)\n"
+"    void *mem = VirtualAlloc(NULL, sc_size, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);\n" 
+"    if (!mem) { fprintf(stderr, \"VirtualAlloc failed\\n\"); return 1; }\n" 
+"    memcpy(mem, shellcode, sc_size);\n" 
+"    DWORD old;\n" 
+"    if (!VirtualProtect(mem, sc_size, PAGE_EXECUTE_READ, &old)) { fprintf(stderr, \"VirtualProtect failed\\n\"); return 1; }\n" 
+"    ((void(*)())mem)();\n"
 "#else\n"
-"    printf(\"Execution disabled. Set ENABLE_EXECUTION to 1 to run shellcode.\\n\");\n"
+"    void *mem = mmap(NULL, sc_size, PROT_READ | PROT_WRITE, MAP_ANON | MAP_PRIVATE, -1, 0);\n" 
+"    if (mem == MAP_FAILED) { perror(\"mmap\"); return 1; }\n" 
+"    memcpy(mem, shellcode, sc_size);\n" 
+"    if (mprotect(mem, sc_size, PROT_READ | PROT_EXEC) == -1) { perror(\"mprotect\"); return 1; }\n" 
+"    ((void(*)())mem)();\n"
 "#endif\n"
+"#else\n"
+"    printf(\"Execution disabled in generated loader. Re-generate with --exec to enable.\\n\");\n"#endif\n"
 "    return 0;\n"
 "}\n");
 
-    fclose(out);
-    printf("Generated loader.c with %zu bytes of shellcode.\n", bytecount);
-    printf("Compile with: gcc loader.c -o loader\n");
+    if (fclose(out) == EOF) perror("fclose");
+
+    printf("Generated loader.c (%zu bytes shellcode). Execution in generated file is %s.\n",
+           bytecount, enable_exec ? "ENABLED" : "DISABLED");
+    if (!enable_exec) printf("To generate a loader with execution enabled, re-run with --exec (explicit opt-in).\n");
+    printf("Compile the generated loader: gcc loader.c -o loader\n");
+
+    free(line);
+    free(norm);
     return 0;
 }
+
