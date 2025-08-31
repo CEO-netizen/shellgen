@@ -1,9 +1,14 @@
 # shellgen
-This is a basic shellcode loader generator coded in C.
 
-It does these two things:
+**shellgen** is a simple shellcode loader generator written in C.
 
-- Takes user input in hex.
-- Prints it into a loader.c file.
+It does the following:
 
-WARNING dont run unknown shellcode on your hardware always try in a VM first it exexutes the shellcode when the loader is first ran or do I dont really care
+- Accepts shellcode input in hexadecimal format.
+- Generates a `loader.c` file that can execute the provided shellcode.
+
+**Important Safety Notice:**
+
+- This tool is for **educational purposes only** and should only be used in **controlled lab environments** (e.g., virtual machines or sandboxed systems).  
+- **Never run untrusted shellcode on your main hardware**, as it can be harmful or destructive.  
+- Use this project responsibly and ethically.
